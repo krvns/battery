@@ -72,10 +72,13 @@ in_zip_folder_name="battery-$update_branch"
 batteryfolder="$tempfolder/battery"
 rm -rf $batteryfolder
 mkdir -p $batteryfolder
-curl -sSL -o $batteryfolder/repo.zip "https://github.com/actuallymentor/battery/archive/refs/heads/$update_branch.zip"
+if ! curl -sfSL -o $batteryfolder/repo.zip "https://github.com/actuallymentor/battery/archive/refs/heads/$update_branch.zip"; then
+	echo "❌ Failed to download battery repository archive."
+	exit 1
+fi
 unzip -qq $batteryfolder/repo.zip -d $batteryfolder
 cp -r $batteryfolder/$in_zip_folder_name/* $batteryfolder
-rm $batteryfolder/repo.zip
+rm -f $batteryfolder/repo.zip
 
 echo "[  4 ] Make sure $binfolder is recreated and owned by root"
 sudo rm -rf "$binfolder" # start with an empty $binfolder and ensure there is no symlink or file at the path

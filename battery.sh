@@ -4,7 +4,7 @@
 ## Update management
 ## variables are used by this binary as well at the update script
 ## ###############
-BATTERY_CLI_VERSION="v1.3.4"
+BATTERY_CLI_VERSION="v1.3.5"
 
 # If a script may run as root:
 #   - Reset PATH to safe defaults at the very beginning of the script.
@@ -36,8 +36,7 @@ voltage_hyst_max="2"
 
 # SECURITY NOTES:
 # - ALWAYS hardcode and use the absolute path to the battery executables to avoid PATH-based spoofing.
-#   Think of the scenario where 'battery update_silent' running as root invokes 'battery visudo' as a
-#   PATH spoofing opportunity example.
+#   Think of the scenario where 'battery visudo' running as root is called to update permissions.
 # - Ensure this script, smc binary and their parent folders are root-owned and not writable by
 #   the user or others.
 # - Ensure that you are not sourcing any user-writable scripts within this script to avoid overrides of
@@ -135,14 +134,9 @@ Usage:
 # File location: /etc/sudoers.d/battery
 # Purpose:
 # - Allows this script to execute 'sudo smc -w' commands without requiring a user password.
-# - Allows passwordless updates.
 visudoconfig="
 # Visudo settings for the battery utility installed from https://github.com/actuallymentor/battery
 # intended to be placed in $visudo_file on a mac
-
-# Allow passwordless update (All battery app executables are owned by root to prevent privilege escalation attacks)
-ALL ALL = NOPASSWD: $battery_binary update_silent
-ALL ALL = NOPASSWD: $battery_binary update_silent is_enabled
 
 # Allow passwordless battery-charging–related SMC write commands
 Cmnd_Alias    CHARGING_OFF = $smc_binary -k CH0B -w 02, $smc_binary -k CH0C -w 02, $smc_binary -k CHTE -w 01000000
@@ -631,36 +625,33 @@ fi
 
 # Reinstall helper
 if [[ "$action" == "reinstall" ]]; then
-	echo "This will run curl -sS ${github_url_setup_sh} | bash"
+	echo "This will download setup.sh and run the setup script"
 	if [[ ! "$setting" == "silent" ]]; then
 		echo "Press any key to continue"
 		read
 	fi
-	curl -sS "$github_url_setup_sh" | bash
+	temp_setup="$(mktemp)"
+	trap 'rm -f "$temp_setup"' EXIT
+	if curl -sSL -o "$temp_setup" "$github_url_setup_sh" && bash -n "$temp_setup"; then
+		bash "$temp_setup"
+	else
+		echo "❌ Failed to download or validate setup script."
+		exit 1
+	fi
 	exit 0
 fi
 
-# Update helper for GUI app
+# Update helper for root fixups
 if [[ "$action" == "update_silent" ]]; then
 
 	assert_running_as_root
 
-	# Exit with success when the GUI app just checks if passwordless updates are enabled
+	# Exit with success when checking helper status
 	if [[ "$setting" == "is_enabled" ]]; then
 		exit 0
 	fi
 
-	# Try updating
-	if ! is_latest_version_installed; then
-		curl -sS "$github_url_update_sh" | bash
-		echo "✅ battery background script was updated to the latest version."
-	else
-		echo "☑️  No updates found"
-	fi
-
-	# Update the visudo configuration on each update ensuring that the latest version
-	# is always installed.
-	# Note: this will overwrite the visudo configuration file only if it is outdated.
+	# Update the visudo configuration to ensure the latest rules are applied
 	$battery_binary visudo
 
 	# Determine the name of unprivileged user
@@ -678,9 +669,6 @@ if [[ "$action" == "update" ]]; then
 
 	assert_not_running_as_root
 
-	# The older GUI versions 1_3_2 and below can not run silent passwordless update and
-	# will complain with alert. Just exit with success and let them update themselves.
-	# Remove this condition in future versions when you believe the old UI is not used anymore.
 	if [[ "$setting" == "silent" ]]; then
 		exit 0
 	fi
@@ -690,28 +678,29 @@ if [[ "$action" == "update" ]]; then
 		exit 1
 	fi
 
-	# The code below repeats integrity checks from GUI app, specifically from
-	# app/modules/battery.js: 'initialize_battery'. Try keeping it consistent.
-
-	function check_installation_integrity() (
-		function not_link_and_root_owned() {
-			[[ ! -L "$1" ]] && [[ $(stat -f '%u' "$1") -eq 0 ]]
-		}
-
-		not_link_and_root_owned "$binfolder" && \
-		not_link_and_root_owned "$battery_binary" && \
-		not_link_and_root_owned "$smc_binary" && \
-		sudo -n "$battery_binary" update_silent is_enabled >/dev/null 2>&1
-	)
-
-	if ! check_installation_integrity; then
-		version_before="0" # Force restart maintenance process
-		echo -e "‼️ The battery installation seems to be broken. Forcing reinstall...\n"
-		$battery_binary reinstall silent
-	else
-		version_before="$($battery_binary version)"
-		sudo $battery_binary update_silent
+	if is_latest_version_installed; then
+		echo "☑️  No updates found. Battery CLI is up to date ($BATTERY_CLI_VERSION)."
+		exit 0
 	fi
+
+	echo "🔋 Downloading battery CLI update..."
+	temp_update_dir="$(mktemp -d)"
+	trap 'rm -rf "$temp_update_dir"' EXIT
+
+	if ! curl -sSL -o "$temp_update_dir/battery.sh" "$github_url_battery_sh"; then
+		echo "❌ Failed to download update."
+		exit 1
+	fi
+
+	if ! bash -n "$temp_update_dir/battery.sh"; then
+		echo "❌ Downloaded update script failed syntax validation."
+		exit 1
+	fi
+
+	version_before="$($battery_binary version)"
+	echo "🔒 Installing update with root privileges..."
+	sudo install -m 755 -o root -g wheel "$temp_update_dir/battery.sh" "$battery_binary"
+	sudo $battery_binary visudo
 
 	# Restart background maintenance process if update was installed
 	if [[ -x $battery_binary ]] && [[ "$($battery_binary version)" != "$version_before" ]]; then
@@ -719,6 +708,7 @@ if [[ "$action" == "update" ]]; then
 		$battery_binary maintain recover
 	fi
 
+	echo "✅ battery background script was updated to version $($battery_binary version)."
 	exit 0
 fi
 

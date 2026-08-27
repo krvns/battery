@@ -190,15 +190,15 @@ const initialize_battery = async () => {
             bin_dir_root_owned,     // This is important. Other software can potentially change the owner allowing for battery executable replacement.
             battery_installed,      // Make sure battery script exists and is root-owned.
             smc_installed,          // Make sure smc binary exists and is root-owned.
-            silent_update_enabled   // Make sure visudo config is installed and allows passwordless update
+            visudo_configured       // Make sure visudo config file exists for battery utility
         ] = await Promise.all( [
             exec_async( `test ! -L ${ binfolder } && test "$(stat -f '%u' ${ binfolder })" -eq 0` ).then( () => true ).catch( log_err_return_false ),
             exec_async( `test ! -L ${ battery } && test "$(stat -f '%u' ${ battery })" -eq 0` ).then( () => true ).catch( log_err_return_false ),
             exec_async( `test ! -L ${ binfolder }/smc && test "$(stat -f '%u' ${ binfolder }/smc)" -eq 0` ).then( () => true ).catch( log_err_return_false ),
-            exec_async( `sudo -n ${ battery } update_silent is_enabled` ).then( () => true ).catch( log_err_return_false )
+            exec_async( `test -f /private/etc/sudoers.d/battery` ).then( () => true ).catch( log_err_return_false )
         ] )
-        const is_installed = bin_dir_root_owned && battery_installed && smc_installed && silent_update_enabled
-        log( 'Is installed? ', is_installed, 'details: ', bin_dir_root_owned, battery_installed, smc_installed, silent_update_enabled )
+        const is_installed = bin_dir_root_owned && battery_installed && smc_installed && visudo_configured
+        log( 'Is installed? ', is_installed, 'details: ', bin_dir_root_owned, battery_installed, smc_installed, visudo_configured )
 
         // Kill running instances of battery
         // Why are we doing this: The maintenance battery process which launches on macOS startup does not update a
@@ -215,7 +215,11 @@ const initialize_battery = async () => {
             if( !online ) return alert( `Battery needs an internet connection to download the latest version, please connect to the internet and open the app again.` )
             await alert( `Welcome to the Battery limiting tool. The app needs to install/update some components, so it will ask for your password. This should only be needed once.` )
             try {
-                const result = await exec_sudo_async( `curl -s https://raw.githubusercontent.com/actuallymentor/battery/main/setup.sh | bash -s -- $USER` )
+                const temp_setup = `/tmp/battery_setup_${ Date.now() }.sh`
+                await exec_async( `curl -sSL -o "${ temp_setup }" https://raw.githubusercontent.com/actuallymentor/battery/main/setup.sh` )
+                await exec_async( `bash -n "${ temp_setup }"` )
+                const result = await exec_sudo_async( `bash "${ temp_setup }" ${ USER }` )
+                await exec_async( `rm -f "${ temp_setup }"` ).catch(() => {})
                 log( `Install result success `, result )
                 await alert( `Battery background components installed/updated successfully. You can find the battery limiter icon in the top right of your menu bar.` )
             } catch ( e ) {
@@ -230,11 +234,14 @@ const initialize_battery = async () => {
             if( skipupdate ) return log( `Skipping update due to environment variable` )
             log( `Updating battery...` )
             try {
-                const result = await exec_async( `sudo -n ${ battery } update_silent` )
+                const temp_update = `/tmp/battery_update_${ Date.now() }.sh`
+                await exec_async( `curl -sSL -o "${ temp_update }" https://raw.githubusercontent.com/actuallymentor/battery/main/update.sh` )
+                await exec_async( `bash -n "${ temp_update }"` )
+                const result = await exec_sudo_async( `bash "${ temp_update }"` )
+                await exec_async( `rm -f "${ temp_update }"` ).catch(() => {})
                 log( `Update details: `, result )
             } catch ( e ) {
                 log( `Battery update failed: `, e )
-                await alert( `Couldn’t complete the update.\n\n${e.message}`)
             }
         }
 
